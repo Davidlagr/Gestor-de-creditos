@@ -3,6 +3,8 @@ import json
 import math
 from datetime import datetime, timedelta, date
 import pandas as pd
+import io
+from fpdf import FPDF
 
 # -----------------------------------------
 # CONFIGURACIÓN DE LA PÁGINA
@@ -33,7 +35,6 @@ def calcular_meses(capital, tasa_mensual, cuota):
     return -math.log(1 - (r * capital) / cuota) / math.log(1 + r)
 
 def calcular_saldo_restante(cuota, tasa_mensual, meses_restantes):
-    # Calcula el saldo actual basado en las cuotas que faltan (Valor Presente)
     if tasa_mensual <= 0: return cuota * meses_restantes
     r = tasa_mensual / 100
     return cuota * (1 - (1 + r)**-meses_restantes) / r
@@ -44,6 +45,70 @@ def parse_date(date_str):
 def calcular_interes_diario(saldo, tasa_mensual, dias):
     tasa_diaria = (tasa_mensual / 100) / 30
     return saldo * tasa_diaria * dias
+
+# -----------------------------------------
+# FUNCIONES DE EXPORTACIÓN (PDF Y EXCEL)
+# -----------------------------------------
+def generar_pdf(cred):
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # Reemplazo seguro de caracteres para evitar errores de codificación en PDF
+    def limpiar_texto(texto):
+        return str(texto).encode('latin-1', 'replace').decode('latin-1')
+
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(200, 10, txt="ESTADO DE CUENTA", ln=True, align="C")
+    pdf.ln(5)
+    
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(200, 10, txt=limpiar_texto(f"Cliente: {cred['nombre']} (Cedula: {cred['cedula']})"), ln=True)
+    
+    pdf.set_font("Arial", "", 12)
+    pdf.cell(200, 10, txt=limpiar_texto(f"Descripcion: {cred['descripcion']}"), ln=True)
+    pdf.cell(200, 10, txt=f"Monto Inicial Prestado: ${cred['monto_inicial']:,.0f}", ln=True)
+    pdf.cell(200, 10, txt=f"Saldo Actual Adeudado: ${cred['saldo_actual']:,.0f}", ln=True)
+    pdf.cell(200, 10, txt=f"Valor de la Cuota: ${cred['cuota_actual']:,.0f}", ln=True)
+    pdf.cell(200, 10, txt=f"Interes Mensual: {cred['tasa_mensual']}%", ln=True)
+    pdf.cell(200, 10, txt=f"Proximo Vencimiento: {cred['fecha_proximo_vencimiento']}", ln=True)
+    
+    pdf.ln(10)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(200, 10, txt="HISTORIAL DE PAGOS:", ln=True)
+    
+    pdf.set_font("Arial", "", 10)
+    if cred['historial']:
+        for pago in cred['historial']:
+            texto = f"Fecha: {pago['Fecha']} | Abono Capital: {pago['Abono a Capital']} | Interes Pagado: {pago['Interés Cubierto']} | Saldo: {pago['Nuevo Saldo']}"
+            pdf.cell(200, 8, txt=limpiar_texto(texto), ln=True)
+    else:
+        pdf.cell(200, 10, txt="No se han registrado pagos todavia.", ln=True)
+        
+    return pdf.output(dest="S").encode("latin-1")
+
+def generar_excel(cred):
+    df_resumen = pd.DataFrame([{
+        "Cliente": cred['nombre'],
+        "Cédula": cred['cedula'],
+        "Descripción": cred['descripcion'],
+        "Monto Inicial": cred['monto_inicial'],
+        "Saldo Actual": cred['saldo_actual'],
+        "Cuota Mensual": cred['cuota_actual'],
+        "Tasa Mensual (%)": cred['tasa_mensual'],
+        "Próximo Vencimiento": cred['fecha_proximo_vencimiento']
+    }])
+    
+    if cred['historial']:
+        df_historial = pd.DataFrame(cred['historial'])
+    else:
+        df_historial = pd.DataFrame({"Aviso": ["No hay pagos registrados aún"]})
+    
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_resumen.to_excel(writer, index=False, sheet_name='Resumen')
+        df_historial.to_excel(writer, index=False, sheet_name='Pagos')
+    
+    return output.getvalue()
 
 # -----------------------------------------
 # INICIALIZAR MEMORIA
@@ -59,14 +124,15 @@ if 'mensaje_reciente' not in st.session_state:
 st.sidebar.title("Navegación 🧭")
 menu = st.sidebar.radio("¿Qué deseas hacer hoy?", 
                         ["📝 1. Crear o Cargar Préstamos", 
-                         "💼 2. Cobrar / Gestionar Préstamos"])
+                         "💼 2. Cobrar / Gestionar Préstamos",
+                         "📄 3. Estados de Cuenta (PDF/Excel)"])
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("<p class='big-font'>💾 Guardar mis cambios</p>", unsafe_allow_html=True)
 
 json_data = json.dumps(st.session_state.creditos, indent=4)
 st.sidebar.download_button(
-    label="⬇️ GUARDAR / DESCARGAR",
+    label="⬇️ GUARDAR / DESCARGAR ARCHIVO JSON",
     data=json_data,
     file_name="mis_prestamos.json",
     mime="application/json"
@@ -84,7 +150,7 @@ if menu == "📝 1. Crear o Cargar Préstamos":
     if archivo_subido is not None:
         if st.button("📥 Leer archivo subido"):
             st.session_state.creditos = json.load(archivo_subido)
-            st.success("¡Libreta cargada! Ya puedes ir a 'Gestionar Préstamos'.")
+            st.success("¡Libreta cargada! Ya puedes navegar por el menú lateral.")
             
     st.markdown("---")
     st.markdown("### ➕ Paso 2: Registrar un préstamo")
@@ -93,9 +159,7 @@ if menu == "📝 1. Crear o Cargar Préstamos":
         col1, col2 = st.columns(2)
         cedula = col1.text_input("💳 Cédula del deudor:")
         nombre = col2.text_input("👤 Nombre de la persona:")
-        
         descripcion = st.text_input("📝 Descripción (Ej: Préstamo para remodelación):")
-        
         monto = st.number_input("💵 Monto ORIGINAL prestado ($):", min_value=0.0, step=50000.0)
         tasa = st.number_input("📈 Interés mensual (%):", min_value=0.0, step=0.5, value=1.0)
         plazo = st.number_input("📅 Plazo TOTAL acordado (en meses):", min_value=1, step=1, value=12)
@@ -103,7 +167,7 @@ if menu == "📝 1. Crear o Cargar Préstamos":
         st.markdown("---")
         st.markdown("#### 🔄 Si el préstamo ya está en curso, llena esto:")
         cuotas_pagadas = st.number_input("✅ ¿Cuántas cuotas ya te ha pagado? (Deja en 0 si es un préstamo nuevo):", min_value=0, step=1, value=0)
-        fecha_referencia = st.date_input("🗓️ Fecha del desembolso (si es nuevo) o del ÚLTIMO pago (si ya está en curso):", datetime.today())
+        fecha_referencia = st.date_input("🗓️ Fecha del desembolso (o del ÚLTIMO pago si ya está en curso):", datetime.today())
         
         crear = st.form_submit_button("✅ Guardar Préstamo")
         
@@ -115,11 +179,9 @@ if menu == "📝 1. Crear o Cargar Préstamos":
             elif cuotas_pagadas >= plazo:
                 st.error("Las cuotas pagadas deben ser menores al plazo total.")
             else:
-                # 1. Calcular cuota original fija
                 cuota_fija = calcular_cuota(monto, tasa, plazo)
                 meses_restantes = plazo - cuotas_pagadas
                 
-                # 2. Calcular saldo actual basado en si ya pagó cuotas
                 if cuotas_pagadas == 0:
                     saldo_actual = monto
                 else:
@@ -146,7 +208,7 @@ if menu == "📝 1. Crear o Cargar Préstamos":
                     st.success(f"¡Préstamo NUEVO guardado! Cuota mensual: ${cuota_fija:,.0f}")
                 else:
                     st.success(f"¡Préstamo EN CURSO guardado!")
-                    st.info(f"El sistema calculó que el saldo actual exacto es de **${saldo_actual:,.0f}**, restando **{meses_restantes} cuotas** de **${cuota_fija:,.0f}**.")
+                    st.info(f"Saldo actual calculado: **${saldo_actual:,.0f}**, restando **{meses_restantes} cuotas** de **${cuota_fija:,.0f}**.")
 
 # -----------------------------------------
 # MÓDULO 2: GESTIONAR
@@ -251,8 +313,43 @@ elif menu == "💼 2. Cobrar / Gestionar Préstamos":
                         st.session_state.creditos[id_credito] = cred
                         st.session_state.mensaje_reciente = msg
                         st.rerun()
+
+# -----------------------------------------
+# MÓDULO 3: ESTADOS DE CUENTA
+# -----------------------------------------
+elif menu == "📄 3. Estados de Cuenta (PDF/Excel)":
+    st.title("📄 Emitir Estado de Cuenta")
+    
+    if not st.session_state.creditos:
+        st.warning("No tienes préstamos registrados para generar estados de cuenta.")
+    else:
+        opciones = [f"[{v['cedula']}] {v['nombre']} - {v['descripcion']}" for k, v in st.session_state.creditos.items()]
+        id_keys = list(st.session_state.creditos.keys())
+        
+        seleccion = st.selectbox("👇 Selecciona el cliente para generar su estado de cuenta:", opciones)
+        idx = opciones.index(seleccion)
+        id_credito = id_keys[idx]
+        cred = st.session_state.creditos[id_credito]
+        
+        st.markdown(f"### Generando reporte para: **{cred['nombre']}**")
+        st.info("Haz clic en cualquiera de los botones inferiores para descargar el documento y enviarlo por WhatsApp o correo.")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            pdf_bytes = generar_pdf(cred)
+            st.download_button(
+                label="📄 Descargar en PDF",
+                data=pdf_bytes,
+                file_name=f"Estado_Cuenta_{cred['cedula']}.pdf",
+                mime="application/pdf"
+            )
             
-            if cred['historial']:
-                st.markdown("### 📜 Detalle de Pagos Realizados")
-                df = pd.DataFrame(cred['historial'])
-                st.dataframe(df, use_container_width=True, hide_index=True)
+        with col2:
+            excel_bytes = generar_excel(cred)
+            st.download_button(
+                label="📊 Descargar en Excel",
+                data=excel_bytes,
+                file_name=f"Estado_Cuenta_{cred['cedula']}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
