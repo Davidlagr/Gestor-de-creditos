@@ -53,7 +53,6 @@ def generar_pdf(cred):
     pdf = FPDF()
     pdf.add_page()
     
-    # Reemplazo seguro de caracteres para evitar errores de codificación en PDF
     def limpiar_texto(texto):
         return str(texto).encode('latin-1', 'replace').decode('latin-1')
 
@@ -62,7 +61,7 @@ def generar_pdf(cred):
     pdf.ln(5)
     
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(200, 10, txt=limpiar_texto(f"Cliente: {cred['nombre']} (Cedula: {cred['cedula']})"), ln=True)
+    pdf.cell(200, 10, txt=limpiar_texto(f"Cliente: {cred['nombre']}"), ln=True)
     
     pdf.set_font("Arial", "", 12)
     pdf.cell(200, 10, txt=limpiar_texto(f"Descripcion: {cred['descripcion']}"), ln=True)
@@ -89,7 +88,6 @@ def generar_pdf(cred):
 def generar_excel(cred):
     df_resumen = pd.DataFrame([{
         "Cliente": cred['nombre'],
-        "Cédula": cred['cedula'],
         "Descripción": cred['descripcion'],
         "Monto Inicial": cred['monto_inicial'],
         "Saldo Actual": cred['saldo_actual'],
@@ -117,6 +115,8 @@ if 'creditos' not in st.session_state:
     st.session_state.creditos = {}
 if 'mensaje_reciente' not in st.session_state:
     st.session_state.mensaje_reciente = None
+if 'credito_actual_id' not in st.session_state:
+    st.session_state.credito_actual_id = None
 
 # -----------------------------------------
 # BARRA LATERAL
@@ -156,9 +156,7 @@ if menu == "📝 1. Crear o Cargar Préstamos":
     st.markdown("### ➕ Paso 2: Registrar un préstamo")
     
     with st.form("nuevo_prestamo"):
-        col1, col2 = st.columns(2)
-        cedula = col1.text_input("💳 Cédula del deudor:")
-        nombre = col2.text_input("👤 Nombre de la persona:")
+        nombre = st.text_input("👤 Nombre de la persona:")
         descripcion = st.text_input("📝 Descripción (Ej: Préstamo para remodelación):")
         monto = st.number_input("💵 Monto ORIGINAL prestado ($):", min_value=0.0, step=50000.0)
         tasa = st.number_input("📈 Interés mensual (%):", min_value=0.0, step=0.5, value=1.0)
@@ -172,8 +170,8 @@ if menu == "📝 1. Crear o Cargar Préstamos":
         crear = st.form_submit_button("✅ Guardar Préstamo")
         
         if crear:
-            if not cedula or not nombre:
-                st.error("Cédula y Nombre son obligatorios.")
+            if not nombre:
+                st.error("El Nombre es obligatorio.")
             elif monto <= 0:
                 st.error("El monto debe ser mayor a cero.")
             elif cuotas_pagadas >= plazo:
@@ -187,11 +185,10 @@ if menu == "📝 1. Crear o Cargar Préstamos":
                 else:
                     saldo_actual = calcular_saldo_restante(cuota_fija, tasa, meses_restantes)
                 
-                id_credito = f"{cedula}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                id_credito = f"{nombre}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
                 fecha_vencimiento = fecha_referencia + timedelta(days=30)
                 
                 st.session_state.creditos[id_credito] = {
-                    "cedula": cedula,
                     "nombre": nombre,
                     "descripcion": descripcion,
                     "monto_inicial": monto,
@@ -230,12 +227,20 @@ elif menu == "💼 2. Cobrar / Gestionar Préstamos":
         if not activos:
             st.success("¡Excelente! Todos los préstamos están pagados.")
         else:
-            opciones = [f"[{v['cedula']}] {v['nombre']} - {v['descripcion']} (Saldo: ${v['saldo_actual']:,.0f})" for k, v in activos.items()]
+            opciones = [f"👤 {v['nombre']} - {v['descripcion']} (Saldo: ${v['saldo_actual']:,.0f})" for k, v in activos.items()]
             id_keys = list(activos.keys())
             
-            seleccion = st.selectbox("👇 Selecciona el crédito a pagar:", opciones)
+            # Recordar el crédito que estaba seleccionado antes del pago
+            indice_por_defecto = 0
+            if st.session_state.credito_actual_id in id_keys:
+                indice_por_defecto = id_keys.index(st.session_state.credito_actual_id)
+            
+            seleccion = st.selectbox("👇 Selecciona el crédito a pagar:", opciones, index=indice_por_defecto)
             idx = opciones.index(seleccion)
             id_credito = id_keys[idx]
+            
+            # Guardar el ID seleccionado actual en la memoria de la sesión
+            st.session_state.credito_actual_id = id_credito
             cred = st.session_state.creditos[id_credito]
             
             st.markdown("---")
@@ -313,6 +318,11 @@ elif menu == "💼 2. Cobrar / Gestionar Préstamos":
                         st.session_state.creditos[id_credito] = cred
                         st.session_state.mensaje_reciente = msg
                         st.rerun()
+            
+            if cred['historial']:
+                st.markdown("### 📜 Detalle de Pagos Realizados")
+                df = pd.DataFrame(cred['historial'])
+                st.dataframe(df, use_container_width=True, hide_index=True)
 
 # -----------------------------------------
 # MÓDULO 3: ESTADOS DE CUENTA
@@ -323,7 +333,7 @@ elif menu == "📄 3. Estados de Cuenta (PDF/Excel)":
     if not st.session_state.creditos:
         st.warning("No tienes préstamos registrados para generar estados de cuenta.")
     else:
-        opciones = [f"[{v['cedula']}] {v['nombre']} - {v['descripcion']}" for k, v in st.session_state.creditos.items()]
+        opciones = [f"👤 {v['nombre']} - {v['descripcion']}" for k, v in st.session_state.creditos.items()]
         id_keys = list(st.session_state.creditos.keys())
         
         seleccion = st.selectbox("👇 Selecciona el cliente para generar su estado de cuenta:", opciones)
@@ -341,7 +351,7 @@ elif menu == "📄 3. Estados de Cuenta (PDF/Excel)":
             st.download_button(
                 label="📄 Descargar en PDF",
                 data=pdf_bytes,
-                file_name=f"Estado_Cuenta_{cred['cedula']}.pdf",
+                file_name=f"Estado_Cuenta_{cred['nombre']}.pdf",
                 mime="application/pdf"
             )
             
@@ -350,6 +360,6 @@ elif menu == "📄 3. Estados de Cuenta (PDF/Excel)":
             st.download_button(
                 label="📊 Descargar en Excel",
                 data=excel_bytes,
-                file_name=f"Estado_Cuenta_{cred['cedula']}.xlsx",
+                file_name=f"Estado_Cuenta_{cred['nombre']}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
